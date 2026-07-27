@@ -5,6 +5,7 @@ Teacher privileged context is filled later in the trainer after OPD+RC.
 
 import torch
 
+from scope.data_utils import sample_disjoint_index
 from scope.prompts import (
     build_student_on_policy_user_message,
     build_opd_rc_user_message,
@@ -18,17 +19,24 @@ class SCOPEDataCollator:
         tokenizer,
         max_length: int = 2048,
         teacher_reasoning_column: str = "teacher_reasoning",
+        calibration_dataset=None,
         student_thinking: bool = False,
         teacher_thinking: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.teacher_reasoning_column = teacher_reasoning_column
+        self.calibration_dataset = calibration_dataset
         self.student_thinking = student_thinking
         self.teacher_thinking = teacher_thinking
 
         print("[SCOPEDataCollator] mode: offline teacher_reasoning + online OPD+RC")
         print(f"[SCOPEDataCollator] teacher_reasoning_column: {self.teacher_reasoning_column}")
+        if self.calibration_dataset is None:
+            raise ValueError("calibration_dataset is required for disjoint register calibration.")
+        if len(self.calibration_dataset) < 2:
+            raise ValueError("Register calibration requires at least two training examples.")
+        print("[SCOPEDataCollator] calibration: K_cal=1, sampled disjointly from training set")
         print(f"[SCOPEDataCollator] student_thinking: {self.student_thinking}")
         print(f"[SCOPEDataCollator] teacher_thinking: {self.teacher_thinking}")
 
@@ -37,7 +45,10 @@ class SCOPEDataCollator:
         opd_rc_prompts = []
         problems = []
         solutions = []
-        teacher_reasoning_texts = []
+        calibration_indices = []
+        calibration_problems = []
+        calibration_solutions = []
+        calibration_teacher_reasoning_texts = []
 
         for feature in features:
             problem = feature.get("problem") or feature.get("question")
@@ -45,16 +56,35 @@ class SCOPEDataCollator:
             if problem is None or solution is None:
                 raise KeyError(f"Missing problem/solution in feature keys: {list(feature.keys())}")
 
-            teacher_reasoning = strip_think_blocks(feature.get(self.teacher_reasoning_column, ""))
+            target_index = feature.get("_scope_index")
+            if target_index is None:
+                raise KeyError("Missing '_scope_index'; add stable row indices before training.")
+            calibration_index = sample_disjoint_index(
+                int(target_index), len(self.calibration_dataset)
+            )
+            calibration = self.calibration_dataset[calibration_index]
+            calibration_problem = calibration.get("problem") or calibration.get("question")
+            calibration_solution = calibration.get("solution") or calibration.get("answer")
+            teacher_reasoning = strip_think_blocks(
+                calibration.get(self.teacher_reasoning_column, "")
+            )
+            if calibration_problem is None or calibration_solution is None:
+                raise KeyError(
+                    "Missing problem/solution in calibration row keys: "
+                    f"{list(calibration.keys())}"
+                )
             if not teacher_reasoning:
                 raise ValueError(
-                    f"Empty '{self.teacher_reasoning_column}'. "
+                    f"Empty '{self.teacher_reasoning_column}' in calibration row. "
                     "Run gen_teacher_reasoning.py first."
                 )
 
             problems.append(problem)
             solutions.append(solution)
-            teacher_reasoning_texts.append(teacher_reasoning)
+            calibration_indices.append(calibration_index)
+            calibration_problems.append(calibration_problem)
+            calibration_solutions.append(calibration_solution)
+            calibration_teacher_reasoning_texts.append(teacher_reasoning)
 
             student_messages = [
                 {"role": "user", "content": build_student_on_policy_user_message(problem)}
@@ -71,7 +101,9 @@ class SCOPEDataCollator:
             rewrite_messages = [
                 {
                     "role": "user",
-                    "content": build_opd_rc_user_message(problem, teacher_reasoning),
+                    "content": build_opd_rc_user_message(
+                        calibration_problem, teacher_reasoning
+                    ),
                 }
             ]
             opd_rc_prompts.append(
@@ -119,5 +151,8 @@ class SCOPEDataCollator:
             "opd_rc_prompt_length": max_rewrite_prompt_len,
             "problems": problems,
             "solutions": solutions,
-            "teacher_reasoning_texts": teacher_reasoning_texts,
+            "calibration_indices": calibration_indices,
+            "calibration_problems": calibration_problems,
+            "calibration_solutions": calibration_solutions,
+            "calibration_teacher_reasoning_texts": calibration_teacher_reasoning_texts,
         }

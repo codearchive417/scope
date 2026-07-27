@@ -28,11 +28,10 @@ OPD_RC_PROMPT = (
     "Put the final answer within \\boxed{}.\n"
 )
 
-OFFLINE_TRANSITION_PROMPT = (
-    "\n\nUsing the reasoning above as privileged guidance, solve the problem directly and coherently. "
-    "Preserve the same mathematical logic and final answer. "
-    "Do not mention the reference solution or that you were given one. "
-    "Do not copy the text verbatim, but keep the reasoning faithful. "
+CALIBRATION_TRANSITION_PROMPT = (
+    "\n\nThe example above illustrates the preferred concise reasoning register. "
+    "Now solve the target problem directly and coherently. "
+    "Do not mention the calibration example or that you were given one. "
     "Do NOT use <think> tags. "
     "Put the final answer within \\boxed{}.\n"
 )
@@ -80,11 +79,18 @@ def build_opd_rc_user_message(problem: str, teacher_reasoning: str) -> str:
     )
 
 
-def build_teacher_privileged_user_message(problem: str, rewritten_reasoning: str) -> str:
+def build_teacher_privileged_user_message(
+    target_problem: str,
+    calibration_problem: str,
+    rewritten_reasoning: str,
+) -> str:
     return (
-        f"Problem: {problem}\n\n"
-        f"=== Reasoning Start ===\n"
+        f"=== Calibration Example Start ===\n"
+        f"Problem: {calibration_problem}\n\n"
+        f"=== Calibrated Reasoning Start ===\n"
         f"{rewritten_reasoning}\n"
-        f"=== Reasoning End ===\n"
-        f"{OFFLINE_TRANSITION_PROMPT}"
+        f"=== Calibrated Reasoning End ===\n"
+        f"=== Calibration Example End ===\n\n"
+        f"Target Problem: {target_problem}\n"
+        f"{CALIBRATION_TRANSITION_PROMPT}"
     )

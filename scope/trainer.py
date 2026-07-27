@@ -211,6 +211,7 @@ class SCOPETrainer(SFTTrainer):
                 tokenizer=processing_class,
                 max_length=args.max_length,
                 teacher_reasoning_column=teacher_reasoning_column,
+                calibration_dataset=train_dataset,
                 student_thinking=student_thinking,
                 teacher_thinking=teacher_thinking,
             )
@@ -600,6 +601,7 @@ class SCOPETrainer(SFTTrainer):
             "problem",
             "solution",
             self.teacher_reasoning_column,
+            "_scope_index",
         ]
         if self._signature_columns is None:
             self._signature_columns = required_columns
@@ -920,10 +922,10 @@ class SCOPETrainer(SFTTrainer):
         return verify_opd_rc_length_ratio(text, reference_reasoning, self.opd_rc_min_len_ratio)
 
     def _run_opd_rc(self, model, inputs: dict) -> tuple[list[str], list[dict]]:
-        problems = inputs["problems"]
-        solutions = inputs["solutions"]
-        teacher_reasoning_texts = inputs["teacher_reasoning_texts"]
-        batch_size = len(problems)
+        calibration_problems = inputs["calibration_problems"]
+        calibration_solutions = inputs["calibration_solutions"]
+        calibration_reasoning_texts = inputs["calibration_teacher_reasoning_texts"]
+        batch_size = len(calibration_problems)
 
         rewrite_prompt_len = inputs["opd_rc_prompt_length"]
         rewrite_ids = self.generate_opd_rc(
@@ -939,16 +941,19 @@ class SCOPETrainer(SFTTrainer):
         for i in range(batch_size):
             raw_text = opd_rc_texts[i].strip()
             text = raw_text
-            solution = solutions[i] if isinstance(solutions[i], str) else solutions[i]
-            problem = problems[i] if isinstance(problems[i], str) else problems[i]
+            solution = calibration_solutions[i]
+            problem = calibration_problems[i]
             fallback_reasoning = (
-                teacher_reasoning_texts[i]
-                if isinstance(teacher_reasoning_texts[i], str)
-                else teacher_reasoning_texts[i]
+                calibration_reasoning_texts[i]
+                if isinstance(calibration_reasoning_texts[i], str)
+                else calibration_reasoning_texts[i]
             )
             fallback_reasoning = strip_think_blocks(fallback_reasoning)
 
             trace = {
+                "calibration_index": inputs["calibration_indices"][i],
+                "calibration_problem": problem,
+                "calibration_solution": solution,
                 "teacher_reasoning_offline": fallback_reasoning,
                 "opd_rc_raw": raw_text,
                 "opd_rc_final": raw_text,
@@ -1015,7 +1020,7 @@ class SCOPETrainer(SFTTrainer):
             sample_idx = random.randint(0, batch_size - 1)
             print(f"\n{'='*80}")
             print(f"OPD+RC SAMPLE (Step {self.state.global_step}):")
-            print(f"Problem: {problems[sample_idx][:200]}...")
+            print(f"Calibration problem: {calibration_problems[sample_idx][:200]}...")
             print(f"Rewrite:\n{final_texts[sample_idx][:500]}...")
             print(f"{'='*80}\n")
 
@@ -1452,8 +1457,8 @@ class SCOPETrainer(SFTTrainer):
 
             if opd_rc_traces is not None and i < len(opd_rc_traces):
                 trace.update(opd_rc_traces[i])
-            elif "teacher_reasoning_texts" in inputs:
-                offline_reasoning = inputs["teacher_reasoning_texts"][i]
+            elif "calibration_teacher_reasoning_texts" in inputs:
+                offline_reasoning = inputs["calibration_teacher_reasoning_texts"][i]
                 trace["teacher_reasoning_offline"] = (
                     offline_reasoning if isinstance(offline_reasoning, str) else str(offline_reasoning)
                 )
@@ -1487,8 +1492,8 @@ class SCOPETrainer(SFTTrainer):
     ) -> torch.Tensor:
         """
         Per-step SCOPE loop:
-          1. Online OPD+RC of offline teacher_reasoning
-          2. Build teacher privileged context from OPD+RC
+          1. Sample a disjoint calibration exemplar and run online OPD+RC
+          2. Prepend the calibration problem--rewrite pair to the target teacher context
           3. Student on-policy completion
           4. Dual-sequence pack + OPD+ST via super().training_step
         """
@@ -1501,8 +1506,10 @@ class SCOPETrainer(SFTTrainer):
             opd_rc_texts, opd_rc_traces = self._run_opd_rc(unwrapped_model, inputs)
             inputs["opd_rc_texts"] = opd_rc_texts
             teacher_prompt_texts = [
-                build_teacher_privileged_user_message(p, r)
-                for p, r in zip(inputs["problems"], opd_rc_texts)
+                build_teacher_privileged_user_message(target, calibration, rewrite)
+                for target, calibration, rewrite in zip(
+                    inputs["problems"], inputs["calibration_problems"], opd_rc_texts
+                )
             ]
             encoded = self._encode_teacher_prompt_texts(teacher_prompt_texts)
             inputs.update(encoded)

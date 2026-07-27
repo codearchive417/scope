@@ -398,6 +398,11 @@ if __name__ == "__main__":
         return out
 
     train_dataset = train_dataset.map(_normalize_columns)
+    if "_scope_index" in train_dataset.column_names:
+        train_dataset = train_dataset.remove_columns("_scope_index")
+    train_dataset = train_dataset.map(
+        lambda _example, index: {"_scope_index": index}, with_indices=True
+    )
 
     col = script_args.teacher_reasoning_column
     if col not in train_dataset.column_names:

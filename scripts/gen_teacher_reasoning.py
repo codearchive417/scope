@@ -23,6 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 from scope.prompts import build_offline_teacher_user_message
 from scope.opd_rc_utils import verify_opd_rc_answer
+from scope.data_utils import retained_teacher_records
 
 
 def normalize_example(example: dict) -> dict:
@@ -120,27 +121,23 @@ def merge_shards(out_path: Path, num_shards: int, total: int, meta_extra: dict |
     if missing:
         raise RuntimeError(f"Merge incomplete: missing {len(missing)} indices (e.g. {missing[:5]})")
 
-    final_records = []
-    for record in records:
-        assert record is not None
-        final_records.append(
-            {
-                "problem": record["problem"],
-                "solution": record["solution"],
-                "teacher_reasoning": record["teacher_reasoning"],
-            }
-        )
+    complete_records = [record for record in records if record is not None]
+    final_records = retained_teacher_records(complete_records)
+    if not final_records:
+        raise RuntimeError("No answer-verified teacher traces remain after filtering.")
 
     out_dataset = Dataset.from_list(final_records)
     out_dataset.save_to_disk(str(out_path))
 
     merged_ckpt = out_path / "checkpoint.jsonl"
     with merged_ckpt.open("w", encoding="utf-8") as f:
-        for record in final_records:
+        for record in complete_records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     meta = {
         "num_samples": len(final_records),
+        "num_processed": len(complete_records),
+        "num_filtered": len(complete_records) - len(final_records),
         "num_shards": num_shards,
         "merged_from_shards": True,
         **(meta_extra or {}),
@@ -185,8 +182,9 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument(
         "--filter_failed_answers",
-        action="store_true",
-        help="Drop samples whose teacher_reasoning fails answer check (else keep original solution text)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop traces that fail the answer check (default: true; paper setting)",
     )
     parser.add_argument(
         "--resume",
@@ -268,6 +266,13 @@ def main():
         existing_records = load_checkpoint_records(checkpoint_path)
         if existing_records:
             print(f"Resuming from {checkpoint_path} ({len(existing_records)} samples done)")
+            if args.filter_failed_answers and any(
+                "answer_verified" not in record for record in existing_records
+            ):
+                raise RuntimeError(
+                    "This checkpoint predates strict answer filtering. Use a fresh output path "
+                    "so failed traces cannot be mistaken for verified traces."
+                )
 
     shard_start, shard_end = get_shard_range(total, args.shard_id, args.num_shards)
     done_indices = {r["idx"] for r in existing_records if "idx" in r}
@@ -288,43 +293,32 @@ def main():
         )
         if args.num_shards == 1:
             records = existing_records[:total]
-            out_dataset = Dataset.from_list(
-                [
-                    {
-                        "problem": r["problem"],
-                        "solution": r["solution"],
-                        "teacher_reasoning": r["teacher_reasoning"],
-                    }
-                    for r in records
-                ]
-            )
+            final_records = retained_teacher_records(records)
+            if not final_records:
+                raise RuntimeError("No answer-verified teacher traces remain after filtering.")
+            out_dataset = Dataset.from_list(final_records)
             out_dataset.save_to_disk(str(out_path))
         return
 
     if args.num_shards == 1 and len(existing_records) >= total:
         print(f"All {total} samples already in checkpoint, writing final dataset...")
         records = existing_records[:total]
-        out_dataset = Dataset.from_list(
-            [
-                {
-                    "problem": r["problem"],
-                    "solution": r["solution"],
-                    "teacher_reasoning": r["teacher_reasoning"],
-                }
-                for r in records
-            ]
-        )
+        final_records = retained_teacher_records(records)
+        if not final_records:
+            raise RuntimeError("No answer-verified teacher traces remain after filtering.")
+        out_dataset = Dataset.from_list(final_records)
         out_dataset.save_to_disk(str(out_path))
         meta = {
             "teacher_model": args.model_name_or_path,
-            "num_samples": len(records),
+            "num_samples": len(final_records),
+            "num_processed": len(records),
             "filter_failed_answers": args.filter_failed_answers,
-            "filtered_fallback_count": 0,
+            "num_filtered": len(records) - len(final_records),
             "resumed_from_checkpoint": len(existing_records),
         }
         with open(out_path / "generation_meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
-        print(f"Saved {len(records)} samples to {out_path}")
+        print(f"Saved {len(final_records)} verified samples to {out_path}")
         return
 
     print(f"Loading teacher model: {args.model_name_or_path}")
@@ -388,16 +382,20 @@ def main():
             new_tokens = output_ids[local_i, input_width:]
             teacher_reasoning = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-            if args.filter_failed_answers and not verify_opd_rc_answer(teacher_reasoning, solution):
+            answer_verified = verify_opd_rc_answer(teacher_reasoning, solution)
+            filtered = args.filter_failed_answers and not answer_verified
+            if filtered:
                 failed_filter += 1
-                teacher_reasoning = solution
 
             record = {
                 "idx": idx,
                 "problem": problem,
                 "solution": solution,
-                "teacher_reasoning": teacher_reasoning,
+                "answer_verified": answer_verified,
+                "filtered": filtered,
             }
+            if not filtered:
+                record["teacher_reasoning"] = teacher_reasoning
             records.append(record)
             append_checkpoint_record(checkpoint_path, record)
         pbar.update(len(batch_indices))
@@ -410,32 +408,27 @@ def main():
         )
         return
 
-    out_dataset = Dataset.from_list(
-        [
-            {
-                "problem": r["problem"],
-                "solution": r["solution"],
-                "teacher_reasoning": r["teacher_reasoning"],
-            }
-            for r in records
-        ]
-    )
+    final_records = retained_teacher_records(records)
+    if not final_records:
+        raise RuntimeError("No answer-verified teacher traces remain after filtering.")
+    out_dataset = Dataset.from_list(final_records)
     out_dataset.save_to_disk(str(out_path))
 
     meta = {
         "teacher_model": args.model_name_or_path,
-        "num_samples": len(records),
+        "num_samples": len(final_records),
+        "num_processed": len(records),
         "filter_failed_answers": args.filter_failed_answers,
-        "filtered_fallback_count": failed_filter,
+        "num_filtered": len(records) - len(final_records),
         "checkpoint_jsonl": str(checkpoint_path),
         "resumed_from_checkpoint": len(existing_records),
     }
     with open(out_path / "generation_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
 
-    print(f"Saved {len(records)} samples to {out_path}")
+    print(f"Saved {len(final_records)} verified samples to {out_path}")
     if args.filter_failed_answers:
-        print(f"Fallback to GT solution for {failed_filter} samples after failed answer check")
+        print(f"Dropped {failed_filter} newly generated traces after failed answer check")
 
 
 if __name__ == "__main__":

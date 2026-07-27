@@ -16,7 +16,9 @@ def format_training_trace_markdown(trace: dict[str, Any], index: int = 0) -> str
 
     _section("Problem", trace.get("problem"))
     _section("Ground Truth Solution", trace.get("solution"))
-    _section("Offline Teacher Reasoning", trace.get("teacher_reasoning_offline"))
+    _section("Calibration Problem", trace.get("calibration_problem"))
+    _section("Calibration Solution", trace.get("calibration_solution"))
+    _section("Offline Teacher Reasoning (Calibration)", trace.get("teacher_reasoning_offline"))
 
     rewrite_meta = []
     if trace.get("opd_rc_answer_ok") is not None:

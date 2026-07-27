@@ -45,7 +45,7 @@ SCOPE combines an offline preparation stage with an online distillation loop:
 ```text
 Offline, once
   problem + reference solution
-        └── frozen 8B teacher ──► teacher reasoning trace ──► save to disk
+        └── frozen 8B teacher ──► teacher reasoning trace ──► answer check ──► save verified traces
 
 Online, every training step
   disjoint teacher trace
@@ -101,7 +101,7 @@ OUTPUT_PATH=data/gsm8k_teacher_reasoning_qwen3_8b \
 bash scripts/run_gen_teacher_reasoning.sh
 ```
 
-To use a local dataset, invoke `scripts/gen_teacher_reasoning.py` with `--dataset_path`. Each example must expose a problem field (`problem`, `question`, or `Question`) and a solution field (`solution`, `answer`, or `Answer`). The generated dataset contains:
+To use a local dataset, invoke `scripts/gen_teacher_reasoning.py` with `--dataset_path`. Each example must expose a problem field (`problem`, `question`, or `Question`) and a solution field (`solution`, `answer`, or `Answer`). Answer filtering is enabled by default, matching the paper: failed teacher generations are recorded as processed in the resumable checkpoint but are omitted from the final dataset. Use a fresh output directory if resuming data produced by an older version that did not record verification status. The generated dataset contains:
 
 ```text
 problem | solution | teacher_reasoning
