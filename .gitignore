@@ -1,0 +1,21 @@
+# Generated / local artifacts (do not commit)
+data/
+outputs/
+logs/
+swanlog/
+models/
+*.pt
+*.bin
+*.safetensors
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.env
+.env.*
+*.pid
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
